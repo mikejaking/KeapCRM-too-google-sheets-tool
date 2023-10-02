@@ -1,0 +1,224 @@
+/*
+ * Michael Acland King
+ * 01-10-2023
+ * Version 1
+ * JavaScript
+
+ * Description: This script pulls KeapCRM data into a Google Sheet and then cleans it up for analysis in Google Looker Studio.
+*/
+
+function updateMultipleSheets() {
+    // Array of desired sheet name prefixes
+    var sheetNames = ["ContactType", "LeadQuality", "ProspectType", "QualifiedAccreditedInvestor"]; // Add more as needed
+
+    // Loop through each sheet name prefix and update the corresponding CleanedData sheet
+    for (var i = 0; i < sheetNames.length; i++) {
+        updateCleanedDataSheet(sheetNames[i]);
+    }
+}
+
+function updateCleanedDataSheet(sheetName) {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Determine the names of the sheets
+    var cleanedDataSheetName = sheetName + "CleanedData";
+    var cleanedDataSheet = ss.getSheetByName(cleanedDataSheetName);
+    var prospectTypeSheet = ss.getSheetByName(sheetName);
+
+    // Check if the source sheet exists
+    if (!prospectTypeSheet) {
+        Logger.log("Source sheet " + sheetName + " not found!");
+        return;  // Exit the function if source sheet doesn't exist
+    }
+
+    // Create the cleaned data sheet if it doesn't exist
+    if (!cleanedDataSheet) {
+        cleanedDataSheet = ss.insertSheet(cleanedDataSheetName);
+    }
+
+    // Clear existing data in the cleaned data sheet
+    cleanedDataSheet.clearContents();
+
+    // Set the headers using a separate function
+    appendUniqueValuesAsHeaders(sheetName);
+
+    // Get the headers from the cleaned data sheet
+    var headers = cleanedDataSheet.getRange(1, 1, 1, cleanedDataSheet.getLastColumn()).getValues()[0];
+
+    // Generate dates for the past 13 months
+    var dates = generatePast13MonthsDates(ss.getSpreadsheetTimeZone());
+    cleanedDataSheet.getRange(2, 1, dates.length, 1).setValues(dates);
+
+    // Get the count of each prospect type for each date
+    var prospectCountMap = generateProspectCountMap(prospectTypeSheet, ss.getSpreadsheetTimeZone());
+
+    // Map the counts to the cleaned data sheet format
+    var finalData = dates.map(function(dateArr) {
+        var row = [dateArr[0]];  // Start with the date
+        headers.slice(1).forEach(function(prospectType) {
+            row.push(prospectCountMap[dateArr[0]] && prospectCountMap[dateArr[0]][prospectType] || 0);
+        });
+        return row;
+    });
+
+    // Write the final data to the cleaned data sheet
+    cleanedDataSheet.getRange(2, 1, finalData.length, headers.length).setValues(finalData);
+}
+
+function generatePast13MonthsDates(timeZone) {
+    var endDate = new Date();
+    var startDate = new Date(endDate);
+    startDate.setMonth(startDate.getMonth() - 13);
+
+    var dates = [];
+    while (startDate <= endDate) {
+        dates.push([Utilities.formatDate(new Date(startDate), timeZone, "yyyy-MM-dd")]);
+        startDate.setDate(startDate.getDate() + 1);
+    }
+    return dates;
+}
+
+function generateProspectCountMap(prospectTypeSheet, timeZone) {
+    var prospectData = prospectTypeSheet.getRange(2, 2, prospectTypeSheet.getLastRow() - 1, 2).getValues();
+    var prospectCountMap = {};
+
+    prospectData.forEach(function(dataRow) {
+        var dateStr = Utilities.formatDate(new Date(dataRow[1]), timeZone, "yyyy-MM-dd");
+        var prospectType = dataRow[0];
+
+        if (!prospectCountMap[dateStr]) prospectCountMap[dateStr] = {};
+        if (!prospectCountMap[dateStr][prospectType]) prospectCountMap[dateStr][prospectType] = 0;
+        prospectCountMap[dateStr][prospectType]++;
+    });
+
+    return prospectCountMap;
+}
+
+
+function appendUniqueValuesAsHeaders(sheetName) {
+    // Access the active spreadsheet
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Determine the name of the cleaned data sheet based on the given sheetName
+    var cleanedDataSheetName = sheetName + "CleanedData";
+    var cleanedDataSheet = ss.getSheetByName(cleanedDataSheetName);
+
+    // Fetch the data from the provided sheetName
+    var prospectTypeSheet = ss.getSheetByName(sheetName);
+    if (!prospectTypeSheet) {  // Optimization: Check if the sheet exists
+        Logger.log("Sheet " + sheetName + " not found!");
+        return;
+    }
+
+    // Extract unique values from column 2 of the sheet
+    var prospectTypes = prospectTypeSheet.getRange(2, 2, prospectTypeSheet.getLastRow() - 1, 1).getValues();
+    var uniqueProspectTypes = {};
+    prospectTypes.forEach(function(pt) {
+        var type = pt[0] || "_blank";  // Assign "_blank" if value is empty
+        uniqueProspectTypes[type] = true;
+    });
+
+    // Convert unique values into an array
+    var uniqueProspectTypesArray = Object.keys(uniqueProspectTypes);
+
+    // Add the "Date" header at the start
+    uniqueProspectTypesArray.unshift("Date");
+
+    // Append the headers to the cleaned data sheet
+    var lastRow = cleanedDataSheet.getLastRow();
+    cleanedDataSheet.getRange(lastRow + 1, 1, 1, uniqueProspectTypesArray.length).setValues([uniqueProspectTypesArray]);
+}
+
+function fetchKeapCRMData() {
+    // Replace with your Infusionsoft subdomain and API Key
+    var subdomain = "SUBDOMAIN";
+    var apiKey = "API KEY";
+    var apiUrl = "https://" + subdomain + ".infusionsoft.com/api/xmlrpc/v1";
+    var pageNumber = 0;
+    var recordsPerPage = 1000;
+    
+    var contactTypeData = [["ID", "Contact Type", "Creation Date"]];
+    var leadQualityData = [["ID", "Lead Quality", "Creation Date"]];
+    var prospectTypeData = [["ID", "Prospect Type", "Creation Date"]];
+    var qualifiedAccreditedInvestorData = [["ID", "Qualified Accredited Investor", "Creation Date"]];
+
+    while (true) {
+        var xmlPayload =
+            '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<methodCall>' +
+            '<methodName>DataService.query</methodName>' +
+            '<params>' +
+            '<param><value><string>' + apiKey + '</string></value></param>' +
+            '<param><value><string>Contact</string></value></param>' +
+            '<param><value><int>' + recordsPerPage + '</int></value></param>' +
+            '<param><value><int>' + pageNumber + '</int></value></param>' +
+            '<param><value><struct></struct></value></param>' +
+            '<param><value><array><data>' +
+            '<value><string>Id</string></value>' +
+            '<value><string>ContactType</string></value>' +
+            '<value><string>_LeadQuality</string></value>' +
+            '<value><string>_ProspectType</string></value>' +
+            '<value><string>_QualifiedAccreditedInvestor</string></value>' +
+            '<value><string>DateCreated</string></value>' +
+            '</data></array></value></param>' +
+            '</params>' +
+            '</methodCall>';
+
+        var options = {
+            "method": "post",
+            "contentType": "text/xml",
+            "payload": xmlPayload,
+            "muteHttpExceptions": true
+        };
+
+        var response = UrlFetchApp.fetch(apiUrl, options);
+        var xmlResponse = response.getContentText();
+        var document = XmlService.parse(xmlResponse);
+        var root = document.getRootElement();
+        var dataArray = root.getChild('params').getChild('param').getChild('value').getChild('array').getChild('data').getChildren('value');
+        
+        if (dataArray.length == 0) {
+            break; // Exit the loop when no more records are found
+        }
+
+        for (var i = 0; i < dataArray.length; i++) {
+            var contactStruct = dataArray[i].getChild('struct').getChildren('member');
+            var contactData = {};
+            for (var j = 0; j < contactStruct.length; j++) {
+                var name = contactStruct[j].getChild('name').getText();
+                var valueElement = contactStruct[j].getChild('value');
+                var value;
+                if (name === "Id" && valueElement.getChild('i4')) {
+                    value = valueElement.getChild('i4').getText();
+                } else if (name === "DateCreated" && valueElement.getChild('dateTime.iso8601')) {
+                    value = valueElement.getChild('dateTime.iso8601').getText();
+                    value = value.substring(0, 4) + '-' + value.substring(4, 6) + '-' + value.substring(6, 8);  // Convert date format
+                } else {
+                    value = valueElement.getText();
+                }
+                contactData[name] = value;
+            }
+
+            contactTypeData.push([contactData["Id"], contactData["ContactType"], contactData["DateCreated"]]);
+            leadQualityData.push([contactData["Id"], contactData["_LeadQuality"], contactData["DateCreated"]]);
+            prospectTypeData.push([contactData["Id"], contactData["_ProspectType"], contactData["DateCreated"]]);
+            qualifiedAccreditedInvestorData.push([contactData["Id"], contactData["_QualifiedAccreditedInvestor"], contactData["DateCreated"]]);
+        }
+        pageNumber++; // Increment the page number
+    }
+
+    // Write to Google Sheets
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    
+    var sheetContactType = spreadsheet.getSheetByName("ContactType");
+    sheetContactType.getRange(1, 1, contactTypeData.length, 3).setValues(contactTypeData);
+    
+    var sheetLeadQuality = spreadsheet.getSheetByName("LeadQuality");
+    sheetLeadQuality.getRange(1, 1, leadQualityData.length, 3).setValues(leadQualityData);
+    
+    var sheetProspectType = spreadsheet.getSheetByName("ProspectType");
+    sheetProspectType.getRange(1, 1, prospectTypeData.length, 3).setValues(prospectTypeData);
+    
+    var sheetQualifiedAccreditedInvestor = spreadsheet.getSheetByName("QualifiedAccreditedInvestor");
+    sheetQualifiedAccreditedInvestor.getRange(1, 1, qualifiedAccreditedInvestorData.length, 3).setValues(qualifiedAccreditedInvestorData);
+}
